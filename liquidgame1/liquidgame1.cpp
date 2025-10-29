@@ -1,14 +1,13 @@
 #include <iostream>
 #include <fstream>
-#include <string>
 #include <sstream>
-#include <vector>
-#include <stack>
+#include <string>
 #include <queue>
-#include <map>
-#include <iomanip>
-#include <limits>
+#include <vector>
+#include <unordered_map>
 #include <chrono>
+#include <cmath>
+#include <iomanip>
 using namespace std;
 
 struct Layer {
@@ -16,292 +15,311 @@ struct Layer {
     double amount;
 };
 
-using container = stack<Layer>; //is a stack of Layers
-using State = vector<container>; //is a vector holding all 7 containers
-
-struct Move {
-    State state;
-    double cost;
+struct State {
+    double max_capacity;
+    Layer tubes[7][10];
+    int num_layers[7];
 };
 
-struct DijkstraNode {
-    double g_cost;
+struct Node {
     State state;
-    vector<State> path;
+    Node* parent;
+    int from_tube;
+    int to_tube;
+    double amount_poured;
+    double total_displacement;//g(n)
+    Node* next;
 };
 
-priority_queue<DijkstraNode> frontier;
+Node* allocated_head = nullptr;
+unordered_map<string, double> cost_so_far;
+double epsilon = 1e-9;
 
-double MAX_CAPACITY = 0.0;
+struct Compare_Dijkstra {
+    bool operator()(Node* a, Node* b) {
+        return a->total_displacement > b->total_displacement;
+    }
+};
 
-bool operator<(const DijkstraNode& lhs, const DijkstraNode& rhs) {
-    return lhs.g_cost > rhs.g_cost;
+bool isEqual(double a, double b) {
+    return fabs(a - b) <= epsilon;
 }
 
-State read_file(const string& filename) {
-    State initial_state(7);
-    ifstream file(filename);
-
-    if (!file.is_open()) {
-        cout << "Error: Could not open file '" << filename << "'" << endl;
-        return initial_state;
-    }
-
-    string line;
-
-    if (getline(file, line)) {
-        MAX_CAPACITY = stod(line); //convert the first line string to float
-    }
-
-    int container_index = 0;
-    while (getline(file, line) && container_index < 6) {
-        stringstream ss(line);
-        string chunk;
-
-        while (getline(ss, chunk, '-')) {
-            stringstream chunk_ss(chunk);
-            char color;
-            double amount;
-
-            if (chunk_ss >> color >> amount) {
-                Layer new_layer;
-                new_layer.color = color;
-                new_layer.amount = amount;
-
-                initial_state[container_index].push(new_layer);
-            }
-        }
-        container_index++;
-    }
-
-    file.close();
-    return initial_state;
+double my_min(double a, double b) {
+    if (a < b) return a;
+    else return b;
 }
 
-void print_state(const State& state) {
-    cout << "--- Game State ---" << endl;
-    cout << "Max Capacity: " << MAX_CAPACITY << "\n" << endl;
-    cout << fixed << setprecision(1);
-
-    for (int i = 0; i < state.size(); i++) {
-        cout << "container " << (i + 1) << ": (Top to Bottom)" << endl;
-
-        if (state[i].empty()) {
-            cout << "  [Empty]" << endl;
-            continue;
-        }
-
-        container temp_stack = state[i];
-
-        // We need to reverse the stack to print bottom-to-top or just print in popped order (top-to-bottom)
-        while (!temp_stack.empty()) {
-            Layer layer = temp_stack.top();
-            temp_stack.pop();
-            cout << "  [" << layer.color << " | " << layer.amount << "]" << endl;
-        }
-        cout << endl;
-    }
-    cout << "--------------------------" << endl;
+double get_tube_total(State s, int tube_index) {
+    double total = 0;
+    for (int i = 0; i < s.num_layers[tube_index]; i++)
+        total += s.tubes[tube_index][i].amount;
+    return total;
 }
 
-string state_to_string(const State& state) {
+string stateToString(State s) {
     stringstream ss;
-    ss << fixed << setprecision(1);
-    for (int i = 0; i < state.size(); i++) {
-        container temp = state[i];
-        stack<Layer> reverse_stack;
-        while (!temp.empty()) {
-            reverse_stack.push(temp.top());
-            temp.pop();
+    string tube_strings[7];
+    for (int i = 0; i < 7; i++) {
+        stringstream tube_ss;
+        int layers = s.num_layers[i];
+        if (layers < 0) layers = 0;
+        if (layers > 10) layers = 10;
+
+        for (int j = 0; j < layers; j++) {
+            double amt = s.tubes[i][j].amount;
+            if (amt <= 0.0) continue;
+            tube_ss << s.tubes[i][j].color << amt << ",";
         }
-        while (!reverse_stack.empty()) {
-            Layer l = reverse_stack.top();
-            reverse_stack.pop();
-            ss << l.color << l.amount << "-";
-        }
-        ss << "|"; // Separator for containers
+        tube_strings[i] = tube_ss.str();
     }
+    for (int i = 0; i < 7; i++)
+        ss << tube_strings[i] << "|";
     return ss.str();
 }
 
-bool is_goal(const State& state) {
-    int solved_containers = 0;
-    for (int i = 0; i < state.size(); i++) {
-        if (state[i].empty()) {
-            solved_containers++;
-            continue;
+Node* createNode(State& state, Node* parent, int from, int to, double poured, double g_cost) {
+    Node* newNode = new Node{ state, parent, from, to, poured, g_cost, nullptr };
+    newNode->next = allocated_head;
+    allocated_head = newNode;
+    return newNode;
+}
+
+void printSolutionPath(Node* goalNode) {
+    if (goalNode == nullptr || goalNode->parent == nullptr) return;
+    printSolutionPath(goalNode->parent);
+    cout << "Pour " << goalNode->amount_poured << " units from tube " << goalNode->from_tube + 1 << " to tube " << goalNode->to_tube + 1 << "\n";
+}
+
+bool isGoal(State s) {
+    int amount_tubes = 0;
+    for (int i = 0; i < 7; i++) {
+        if (s.num_layers[i] == 0) {
+            amount_tubes++;
         }
-        char target_color = state[i].top().color;
-        bool is_monochromatic = true;
-        container temp = state[i];
-        while (!temp.empty()) {
-            if (temp.top().color != target_color) {
-                is_monochromatic = false;
-                break;
+        else if (s.num_layers[i] == 1) {
+            if (s.tubes[i][0].amount == 10)
+                amount_tubes++;
+        }
+    } return amount_tubes == 7;
+}
+
+void pour(State& s, int from_tube, int to_tube, double amount) {
+    int fromTopIndex = s.num_layers[from_tube] - 1;
+    char color = s.tubes[from_tube][fromTopIndex].color;
+
+    s.tubes[from_tube][fromTopIndex].amount -= amount;
+    if (isEqual(s.tubes[from_tube][fromTopIndex].amount, 0.0))
+        s.num_layers[from_tube]--;
+
+    int toTopIndex = s.num_layers[to_tube] - 1;
+    //// Don't pour from a pure tube (all same color)
+    //bool srcIsPure = true;
+    //for (int i = 0; i < s.num_layers[from_tube]; i++) {
+    //    if (s.tubes[from_tube][i].color != color) {
+    //        srcIsPure = false;
+    //        break;
+    //    }
+    //}
+    //if (srcIsPure) return;
+
+    if (s.num_layers[to_tube] > 0 && s.tubes[to_tube][toTopIndex].color == color)
+        s.tubes[to_tube][toTopIndex].amount += amount;
+    else { //if there is differente colors or the tube is empty
+        int toNewIndex = s.num_layers[to_tube];
+        s.tubes[to_tube][toNewIndex].color = color;
+        s.tubes[to_tube][toNewIndex].amount = amount;
+        s.num_layers[to_tube]++;
+    }
+}
+
+void print_state(State s) {
+    int max_h = s.max_capacity;
+    cout << "\n";
+    for (int h = max_h; h >= 1; h--) {
+        for (int t = 0; t < 7; t++) {
+            double current_total_fill = get_tube_total(s, t);
+            if (h > current_total_fill)
+                cout << "| | ";
+            else {
+                double height_so_far = 0.0;
+                char color_at_this_height = '?';//never print
+
+                for (int j = 0; j < s.num_layers[t]; j++) {
+                    height_so_far += s.tubes[t][j].amount;
+
+                    if (h <= height_so_far) {
+                        color_at_this_height = s.tubes[t][j].color;
+                        break;
+                    }
+                }
+                cout << "|" << color_at_this_height << "| ";
             }
-            temp.pop();
         }
-        if (is_monochromatic) {
-            solved_containers++;
-        }
+        cout << endl;
     }
-    return (solved_containers == 7);
+    for (int t = 0; t < 7; t++) {
+        cout << "--- ";
+    } cout << endl;
+    for (int t = 0; t < 7; t++) {
+        cout << " " << t + 1 << "  ";
+    } cout << endl;
+
+    for (int t = 0; t < 7; t++) {
+        double total = get_tube_total(s, t);
+        cout << total << "  ";
+    }
 }
 
-void print_state_line(State& state) {
-    cout << fixed << setprecision(1);
-    for (int i = 0; i < state.size(); i++) {
-        cout << "C" << (i + 1) << ":";
-        if (state[i].empty()) {
-            cout << "[Empty] ";
-            continue;
-        }
-        container temp = state[i];
-        string s = "";
-        while (!temp.empty()) {
-            Layer l = temp.top();
-            temp.pop();
-            // Shorten print: R|5.0
-            s = "[" + string(1, l.color) + "|" + to_string(l.amount).substr(0, 3) + "]" + s;
-        }
-        cout << s << " ";
+void cleanup_memory() {
+    Node* curr = allocated_head;
+    while (curr) {
+        Node* temp = curr;
+        curr = curr->next;
+        delete temp;
     }
-    cout << endl;
+    allocated_head = nullptr;
 }
 
-double get_container_sum(const container& c) {
-    container temp = c;
-    double sum = 0.0;
-    while (!temp.empty()) {
-        sum += temp.top().amount;
-        temp.pop();
-    }
-    return sum;
-}
+void solve_dijkstra(State start) {
+    priority_queue<Node*, vector<Node*>, Compare_Dijkstra> frontier;
+    string start_state = stateToString(start);
+    cost_so_far[start_state] = 0.0;
 
-vector<Move> get_successors(const State& current_state) {
-    vector<Move> successors;
-    for (int i = 0; i < 7; i++) { // Source 'i'
-        if (current_state[i].empty()) continue;
-        Layer top_layer = current_state[i].top();
-        double move_cost = top_layer.amount;
+    Node* startNode = createNode(start, nullptr, -1, -1, 0.0, 0.0);
+    frontier.push(startNode);
 
-        for (int j = 0; j < 7; j++) { // Destination 'j'
-            if (i == j) continue;
-
-            double dest_fill = get_container_sum(current_state[j]);
-            if (dest_fill + move_cost <= MAX_CAPACITY) {
-                State new_state = current_state;
-                new_state[i].pop();
-                new_state[j].push(top_layer);
-
-                Move new_move;
-                new_move.state = new_state;
-                new_move.cost = move_cost;
-                successors.push_back(new_move);
-            }
-        }
-    }
-    return successors;
-}
-
-void solve_dijkstra(State initial_state) {
-    map<string, double> visited_g_costs;
-
-    DijkstraNode start_node;
-    start_node.g_cost = 0.0;
-    start_node.state = initial_state;
-    start_node.path.push_back(initial_state);
-
-    frontier.push(start_node);
-    visited_g_costs[state_to_string(initial_state)] = 0.0;
-
-    cout << "Solving with Dijkstra's (Unconscious Method)..." << endl;
-    int states_explored = 0;
+    Node* goalNode = nullptr;
+    int nodes_explored = 0;
 
     while (!frontier.empty()) {
-        DijkstraNode current = frontier.top();
+        Node* curr_node = frontier.top();
         frontier.pop();
-        states_explored++;
+        nodes_explored++;
 
-        string current_key = state_to_string(current.state);
+        string curr_state = stateToString(curr_node->state);
 
-        //skips useless paths
-        if (current.g_cost > visited_g_costs[current_key]) continue;
+        if (curr_node->total_displacement > cost_so_far[curr_state]) continue;
 
-        if (is_goal(current.state)) {
-            cout << "\n--- DIJKSTRA'S SOLUTION FOUND! ---" << endl;
-            cout << "Total Fluid Displacement: " << current.g_cost << endl;
-            cout << "Total Steps: " << current.path.size() - 1 << endl;
-            cout << "States Explored: " << states_explored << "\n" << endl;
-
-            for (int i = 0; i < current.path.size(); i++) {
-                print_state_line(current.path[i]);
-            }
-            return;
+        if (isGoal(curr_node->state)) {
+            goalNode = curr_node;
+            break;
         }
 
-        vector<Move> successors = get_successors(current.state);
-        for (int i = 0; i < successors.size(); i++) {
-            State next_state = successors[i].state;
-            double move_cost = successors[i].cost;
+        for (int from = 0; from < 7; from++) {
+            if (curr_node->state.num_layers[from] == 0) continue;
 
-            double new_g_cost = current.g_cost + move_cost;
-            string next_key = state_to_string(next_state);
+            int top_layer_index = curr_node->state.num_layers[from] - 1;
+            double src_Amount = curr_node->state.tubes[from][top_layer_index].amount;
 
-            if (visited_g_costs.find(next_key) == visited_g_costs.end() ||
-                new_g_cost < visited_g_costs[next_key]) {
-                visited_g_costs[next_key] = new_g_cost;
-                DijkstraNode next_node;
-                next_node.g_cost = new_g_cost;
-                next_node.state = next_state;
-                next_node.path = current.path;
-                next_node.path.push_back(next_state);
-                frontier.push(next_node);
+            for (int to = 0; to < 7; to++) {
+                if (from == to) continue;
+
+                double dst_Free = curr_node->state.max_capacity - get_tube_total(curr_node->state, to);
+                if (isEqual(dst_Free, 0.0) || dst_Free < 0) continue;
+                double amount = my_min(src_Amount, dst_Free);
+                if (isEqual(amount, 0.0) || amount <= 0) continue;
+
+                State newState = curr_node->state;
+                pour(newState, from, to, amount);
+
+                double new_g_cost = curr_node->total_displacement + amount;
+                string newStateString = stateToString(newState);
+
+                if (cost_so_far.find(newStateString) == cost_so_far.end() || new_g_cost < cost_so_far[newStateString]) {
+                    cost_so_far[newStateString] = new_g_cost;
+                    double new_f_cost = new_g_cost;
+
+                    Node* newNode = createNode(newState, curr_node, from, to, amount, new_g_cost);
+
+                    frontier.push(newNode);
+                }
             }
         }
     }
-    cout << "--- No Solution Found ---" << endl;
+
+    if (goalNode) {
+        cout << "\nSolution found with total displacement cost: " << goalNode->total_displacement << "\n";
+        cout << defaultfloat;
+
+        cout << "Nodes explored: " << nodes_explored << "\n";
+        cout << "\n--- Final State ---" << endl;
+        print_state(goalNode->state);
+        cout << "\n--- Solution Path ---" << endl;
+        printSolutionPath(goalNode);
+    }
+    else cout << "No solution found after exploring " << nodes_explored << " nodes.\n";
+    cleanup_memory();
 }
 
-void solve_a_star(State initial_state) {
-    cout << "A* search is not implemented yet." << endl;
+void solve_a_star(State start) {
+
 }
 
 int main() {
-    State initial = read_file("D:\\Main\\ai-projects\\test1.txt");
+    ifstream file("D:\\Main\\ai-projects\\test1.txt");
+    if (!file.is_open()) {
+        cout << "Error open file";
+        return 1;
+    }
+
+    State state;
+    string line;
+    getline(file, line);
+    state.max_capacity = stod(line);
+
+    for (int i = 0; i < 7; i++) {
+        state.num_layers[i] = 0;
+        string line;
+        getline(file, line);
+        if (line.empty()) continue;
+
+        stringstream tube_line(line);
+        string peace;
+        while (getline(tube_line, peace, '-')) {
+            stringstream ss(peace);
+            string color_str;
+            double amount_double;
+            if (ss >> color_str >> amount_double) {
+                if (state.num_layers[i] < 10) {
+                    state.tubes[i][state.num_layers[i]].color = color_str[0];
+                    state.tubes[i][state.num_layers[i]].amount = amount_double;
+                    state.num_layers[i]++;
+                }
+            }
+        }
+    }
+    file.close();
+
     cout << "--- Initial State ---" << endl;
-    print_state(initial);
-    cout << "Which method do you want to use?" << endl;
-    cout << "1. Unconscious Method (Dijkstra's Algorithm)" << endl;
-    cout << "2. Conscious Method (A* Search)" << endl;
-    cout << "Enter 1 or 2: ";
+    print_state(state);
+
+    cout << "\nWhich method do you want to use?\n";
+    cout << "1. Unconscious Method (Dijkstra's Algorithm)\n";
+    cout << "2. Conscious Method (A* Search)\n";
 
     int choice;
     while (true) {
         cout << "Enter 1 or 2: ";
         cin >> choice;
-
         if (choice == 1) {
-            system("cls");
+            cout << "\nRunning 'Unconscious Method' (Dijkstra)...\n";
             auto startTime = chrono::high_resolution_clock::now();
-            solve_dijkstra(initial);
+            solve_dijkstra(state);
             auto endTime = chrono::high_resolution_clock::now();
             double duration = chrono::duration<double>(endTime - startTime).count();
-            cout << "Execution time: " << duration << " seconds\n";
+            cout << "\nExecution time: " << setprecision(4) << duration << " seconds\n";
             break;
         }
         else if (choice == 2) {
-            system("cls");
+            cout << "\nRunning 'Conscious Method' (A* Search)...\n";
             auto startTime = chrono::high_resolution_clock::now();
-            solve_a_star(initial);
+            solve_a_star(state);
             auto endTime = chrono::high_resolution_clock::now();
             double duration = chrono::duration<double>(endTime - startTime).count();
-            cout << "Execution time: " << duration << " seconds\n";
+            cout << "\nExecution time: " << setprecision(4) << duration << " seconds\n";
             break;
         }
-        else {
-            cout << "Invalid choice. Please enter 1 or 2." << endl;
-        }
+        else cout << "Invalid choice.\n";
     }
 }
